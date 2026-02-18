@@ -52,7 +52,6 @@ async def _main() -> None:
 
     # Ensure a token is present before attempting to start the bot.
     if not settings.discord_token:
-        logger = logging.getLogger(__name__)
         logger.error(
             "DISCORD_TOKEN is not set. Set the DISCORD_TOKEN environment variable or provide it in .env"
         )

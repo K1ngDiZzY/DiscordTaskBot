@@ -133,9 +133,22 @@ class Database:
             await self._conn.execute(_MIGRATE_SQL)
             await self._conn.commit()
             logger.info("Migration applied: added assigned_to_id column.")
-        except Exception:
-            # Column already exists — SQLite raises OperationalError; swallow it.
-            pass
+        except aiosqlite.OperationalError as exc:
+            # Column already exists — SQLite raises OperationalError; ignore only
+            # the duplicate-column case and re-raise anything unexpected.
+            message = str(exc).lower()
+            if "duplicate column" in message or "already exists" in message:
+                logger.debug(
+                    "Migration skipped: assigned_to_id column already exists: %s",
+                    exc,
+                )
+            else:
+                logger.error(
+                    "Unexpected OperationalError during migration; "
+                    "database schema may be inconsistent.",
+                    exc_info=True,
+                )
+                raise
         # 3. Now safe to create the index that depends on assigned_to_id.
         await self._conn.executescript(_CREATE_ASSIGNED_INDEX_SQL)
         await self._conn.commit()
