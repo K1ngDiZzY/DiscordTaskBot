@@ -10,12 +10,14 @@ Contains interactive UI components:
 from __future__ import annotations
 
 import logging
-from datetime import datetime
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import discord
 from discord import ui
 
+from bot.config import settings
 from bot.models import (
     Task,
     TaskCreateRequest,
@@ -47,25 +49,120 @@ _DT_FORMATS = [
     "%Y-%m-%d",
 ]
 
+# Presets shown in the quick-date select menu.
+# Value format:  "<offset_hours>h" | "today_<HH>" | "tomorrow_<HH>" | "<days>d"
+_DATE_PRESETS: list[tuple[str, str, str]] = [
+    ("⏰", "In 1 hour",          "1h"),
+    ("⏰", "In 2 hours",         "2h"),
+    ("⏰", "In 4 hours",         "4h"),
+    ("📅", "Today at 5:00 PM",   "today_17"),
+    ("📅", "Tomorrow at 9:00 AM","tomorrow_09"),
+    ("📅", "Tomorrow at 5:00 PM","tomorrow_17"),
+    ("📅", "In 1 week",          "7d"),
+    ("✏️", "Custom date/time…",  "custom"),
+]
+
+
+def _resolve_preset(value: str) -> datetime:
+    """Convert a preset select value to a UTC-naive :class:`datetime`.
+
+    Args:
+        value: One of the preset strings from :data:`_DATE_PRESETS`.
+
+    Returns:
+        A naive datetime representing the resolved UTC time.
+    """
+    now = datetime.now(UTC).replace(tzinfo=None)
+    if value.endswith("h"):
+        return now + timedelta(hours=int(value[:-1]))
+    if value.endswith("d"):
+        return now + timedelta(days=int(value[:-1]))
+    if value.startswith("today_"):
+        hour = int(value.split("_")[1])
+        return now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if value.startswith("tomorrow_"):
+        hour = int(value.split("_")[1])
+        return (now + timedelta(days=1)).replace(
+            hour=hour, minute=0, second=0, microsecond=0
+        )
+    raise ValueError(f"Unknown preset: {value}")
+
+
+def _local_to_utc(dt: datetime) -> datetime:
+    """Convert a naive datetime in ``bot_timezone`` to a naive UTC datetime.
+
+    If the configured timezone is invalid, falls back to treating the
+    input as UTC and logs a warning.
+
+    Args:
+        dt: A naive datetime in the bot's configured local timezone.
+
+    Returns:
+        A naive datetime in UTC.
+    """
+    try:
+        tz = ZoneInfo(settings.bot_timezone)
+    except (ZoneInfoNotFoundError, KeyError):
+        logger.warning(
+            "Unknown BOT_TIMEZONE %r — treating input as UTC.",
+            settings.bot_timezone,
+        )
+        return dt
+    aware_local = dt.replace(tzinfo=tz)
+    return aware_local.astimezone(UTC).replace(tzinfo=None)
+
 
 def _parse_dt(value: str) -> datetime | None:
     """Try to parse a user-supplied datetime string.
 
-    Attempts several common formats.
+    Supports ``YYYY-MM-DD HH:MM`` and common shorthand:
+    ``today HH:MM``, ``tomorrow HH:MM``, ``in Xh``, ``in Xd``.
 
     Args:
         value: Raw string from the user.
 
     Returns:
-        A naive :class:`datetime` (treated as UTC by convention), or None if
-        the string is empty.
+        A naive :class:`datetime` (treated as UTC), or ``None`` if empty.
 
     Raises:
-        ValueError: If the string is non-empty but cannot be parsed.
+        ValueError: If the string cannot be parsed.
     """
     value = value.strip()
     if not value:
         return None
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    lower = value.lower()
+
+    # Relative shorthands — relative to now in UTC
+    if lower.startswith("in "):
+        rest = lower[3:].strip()
+        try:
+            if rest.endswith("h"):
+                return datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=float(rest[:-1]))
+            if rest.endswith("d"):
+                return datetime.now(UTC).replace(tzinfo=None) + timedelta(days=float(rest[:-1]))
+        except ValueError:
+            pass
+
+    # today / tomorrow — interpret entered time as local, convert to UTC
+    for prefix, delta_days in (("today ", 0), ("tomorrow ", 1)):
+        if lower.startswith(prefix):
+            time_part = value[len(prefix):].strip()
+            for fmt in ("%H:%M", "%I:%M %p", "%I%p"):
+                try:
+                    t = datetime.strptime(time_part, fmt)
+                    local_now = datetime.now(ZoneInfo(settings.bot_timezone)).replace(tzinfo=None)
+                    base = (local_now + timedelta(days=delta_days)).replace(
+                        hour=t.hour, minute=t.minute, second=0, microsecond=0
+                    )
+                    return _local_to_utc(base)
+                except (ValueError, ZoneInfoNotFoundError):
+                    continue
+            raise ValueError(
+                f"Could not parse time '{time_part}'. Use HH:MM (e.g. 09:00)."
+            )
+
     for fmt in _DT_FORMATS:
         try:
             return datetime.strptime(value, fmt)
@@ -73,7 +170,7 @@ def _parse_dt(value: str) -> datetime | None:
             continue
     raise ValueError(
         f"Could not parse '{value}'. "
-        "Please use format: YYYY-MM-DD HH:MM  (e.g. 2026-03-15 09:00)"
+        "Try: YYYY-MM-DD HH:MM · today 09:00 · tomorrow 17:00 · in 2h"
     )
 
 
@@ -206,14 +303,16 @@ class TaskEditModal(ui.Modal, title="Edit Task"):
         max_length=10,
     )
     task_due: ui.TextInput = ui.TextInput(
-        label="Due date — YYYY-MM-DD HH:MM  (clear = leave blank)",
+        label="Due date (YYYY-MM-DD HH:MM, blank=clear)",
+        placeholder="e.g. 2026-03-15 09:00  ·  tomorrow 17:00  ·  in 2h",
         required=False,
-        max_length=20,
+        max_length=30,
     )
     task_reminder: ui.TextInput = ui.TextInput(
-        label="Reminder — YYYY-MM-DD HH:MM  (clear = leave blank)",
+        label="Reminder (YYYY-MM-DD HH:MM, blank=clear)",
+        placeholder="e.g. 2026-03-14 09:00  ·  tomorrow 08:00  ·  in 1h",
         required=False,
-        max_length=20,
+        max_length=30,
     )
 
     def __init__(self, task: Task, db: "Database") -> None:
@@ -296,6 +395,291 @@ class TaskEditModal(ui.Modal, title="Edit Task"):
 
 
 # ---------------------------------------------------------------------------
+# Quick date picker
+# ---------------------------------------------------------------------------
+
+
+class _CustomDateModal(ui.Modal, title="Set Custom Date/Time"):
+    """Fallback single-field modal for power-user date entry."""
+
+    date_input: ui.TextInput = ui.TextInput(
+        label="Date & Time",
+        placeholder="2026-03-15 09:00  ·  tomorrow 17:00  ·  in 2h",
+        max_length=30,
+    )
+
+    def __init__(
+        self,
+        task: Task,
+        db: "Database",
+        field: "Literal['due_at', 'reminder_at']",
+    ) -> None:
+        super().__init__()
+        self._task = task
+        self._db = db
+        self._field = field
+        self.title = "Set Due Date" if field == "due_at" else "Set Reminder"
+
+    async def on_submit(  # type: ignore[override]
+        self, interaction: discord.Interaction
+    ) -> None:
+        """Parse the free-text entry and save."""
+        await interaction.response.defer(ephemeral=True)
+        try:
+            dt = _parse_dt(self.date_input.value)
+        except ValueError as exc:
+            await interaction.followup.send(
+                embed=error_embed(str(exc)), ephemeral=True
+            )
+            return
+        if self._field == "due_at":
+            req = TaskUpdateRequest(due_at=dt, clear_due=(dt is None))
+        else:
+            req = TaskUpdateRequest(reminder_at=dt, clear_reminder=(dt is None))
+        updated = await self._db.update_task(self._task.id, req)
+        if updated is None:
+            await interaction.followup.send(
+                embed=error_embed("Task not found."), ephemeral=True
+            )
+            return
+        label = "Due date" if self._field == "due_at" else "Reminder"
+        view = TaskDetailView(task=updated, db=self._db)
+        await interaction.followup.send(
+            content=f"✅ {label} updated!",
+            embed=task_detail_embed(updated),
+            view=view,
+            ephemeral=True,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Day / Hour / AM-PM / Minute select components used by DatePickerView
+# ---------------------------------------------------------------------------
+
+class _DaySelect(ui.Select):
+    def __init__(self) -> None:
+        options = [
+            discord.SelectOption(label="Today",      value="today",  emoji="📅"),
+            discord.SelectOption(label="Tomorrow",   value="tomorrow", emoji="📅"),
+            discord.SelectOption(label="In 2 days",  value="2d",    emoji="📅"),
+            discord.SelectOption(label="In 3 days",  value="3d",    emoji="📅"),
+            discord.SelectOption(label="In 1 week",  value="7d",    emoji="📅"),
+            discord.SelectOption(label="In 2 weeks", value="14d",   emoji="📅"),
+            discord.SelectOption(label="In 1 month", value="30d",   emoji="📅"),
+            discord.SelectOption(label="Custom…",    value="custom", emoji="✏️"),
+        ]
+        super().__init__(placeholder="📅 Day…", options=options, row=0)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view: DatePickerView = self.view  # type: ignore[assignment]
+        if self.values[0] == "custom":
+            await interaction.response.send_modal(
+                _CustomDateModal(task=view._task, db=view._db, field=view._field)
+            )
+            return
+        view._day = self.values[0]
+        view._refresh_confirm()
+        await interaction.response.edit_message(
+            content=view._summary(), view=view
+        )
+
+
+class _HourSelect(ui.Select):
+    def __init__(self) -> None:
+        options = [
+            discord.SelectOption(label=str(h), value=str(h))
+            for h in range(1, 13)
+        ]
+        super().__init__(placeholder="🕐 Hour…", options=options, row=1)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view: DatePickerView = self.view  # type: ignore[assignment]
+        view._hour = int(self.values[0])
+        view._refresh_confirm()
+        await interaction.response.edit_message(
+            content=view._summary(), view=view
+        )
+
+
+class _AmPmSelect(ui.Select):
+    def __init__(self) -> None:
+        options = [
+            discord.SelectOption(label="AM", value="am", emoji="🌅"),
+            discord.SelectOption(label="PM", value="pm", emoji="🌆"),
+        ]
+        super().__init__(placeholder="AM / PM", options=options, row=2)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view: DatePickerView = self.view  # type: ignore[assignment]
+        view._ampm = self.values[0]
+        view._refresh_confirm()
+        await interaction.response.edit_message(
+            content=view._summary(), view=view
+        )
+
+
+class _MinuteSelect(ui.Select):
+    def __init__(self) -> None:
+        options = [
+            discord.SelectOption(label=":00", value="0"),
+            discord.SelectOption(label=":15", value="15"),
+            discord.SelectOption(label=":30", value="30"),
+            discord.SelectOption(label=":45", value="45"),
+        ]
+        super().__init__(
+            placeholder="🕐 Minutes (default :00)…", options=options, row=3
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view: DatePickerView = self.view  # type: ignore[assignment]
+        view._minute = int(self.values[0])
+        view._refresh_confirm()
+        await interaction.response.edit_message(
+            content=view._summary(), view=view
+        )
+
+
+class DatePickerView(ui.View):
+    """Structured date/time picker using four dropdowns + a confirm button.
+
+    Row 0 — Day (Today / Tomorrow / In X days / Custom…)
+    Row 1 — Hour (1–12)
+    Row 2 — AM / PM
+    Row 3 — Minutes (:00 / :15 / :30 / :45)
+    Row 4 — ✅ Confirm  |  ✖ Cancel
+    """
+
+    def __init__(
+        self,
+        task: Task,
+        db: "Database",
+        field: "Literal['due_at', 'reminder_at']",
+    ) -> None:
+        super().__init__(timeout=120)
+        self._task = task
+        self._db = db
+        self._field = field
+        self._day: str | None = None
+        self._hour: int | None = None
+        self._ampm: str | None = None
+        self._minute: int = 0
+        self.add_item(_DaySelect())
+        self.add_item(_HourSelect())
+        self.add_item(_AmPmSelect())
+        self.add_item(_MinuteSelect())
+        # Confirm button is added last so _refresh_confirm can find it
+        self._confirm_btn: ui.Button = ui.Button(
+            label="✅ Confirm",
+            style=discord.ButtonStyle.success,
+            row=4,
+            disabled=True,
+        )
+        self._confirm_btn.callback = self._confirm_callback
+        self._cancel_btn: ui.Button = ui.Button(
+            label="✖ Cancel",
+            style=discord.ButtonStyle.secondary,
+            row=4,
+        )
+        self._cancel_btn.callback = self._cancel_callback
+        self.add_item(self._confirm_btn)
+        self.add_item(self._cancel_btn)
+
+    # ------------------------------------------------------------------
+
+    def _summary(self) -> str:
+        """Build the picker status line shown above the dropdowns."""
+        label = "📅 **Set due date**" if self._field == "due_at" else "🔔 **Set reminder**"
+        parts: list[str] = []
+        if self._day:
+            day_label = {
+                "today": "Today", "tomorrow": "Tomorrow",
+                "2d": "In 2 days", "3d": "In 3 days", "7d": "In 1 week",
+                "14d": "In 2 weeks", "30d": "In 1 month",
+            }.get(self._day, self._day)
+            parts.append(day_label)
+        else:
+            parts.append("*day?*")
+        if self._hour and self._ampm:
+            parts.append(f"{self._hour}:{self._minute:02d} {self._ampm.upper()}")
+        elif self._hour:
+            parts.append(f"{self._hour}:{self._minute:02d} *AM/PM?*")
+        else:
+            parts.append("*time?*")
+        return (
+            f"{label} — {' · '.join(parts)}\n"
+            "Select all dropdowns then press **Confirm**."
+        )
+
+    def _refresh_confirm(self) -> None:
+        """Enable the confirm button only when day + hour + am/pm are set."""
+        self._confirm_btn.disabled = not (
+            self._day and self._hour is not None and self._ampm
+        )
+
+    def _resolve_dt(self) -> datetime:
+        """Build the final UTC-naive :class:`datetime` from current selections.
+
+        The user's 12-hour selection is treated as ``bot_timezone`` local
+        time and converted to UTC before storage.
+        """
+        try:
+            tz = ZoneInfo(settings.bot_timezone)
+        except (ZoneInfoNotFoundError, KeyError):
+            tz = UTC  # type: ignore[assignment]
+        now_local = datetime.now(tz).replace(tzinfo=None)
+        if self._day == "today":
+            base = now_local
+        elif self._day == "tomorrow":
+            base = now_local + timedelta(days=1)
+        else:
+            base = now_local + timedelta(days=int(str(self._day).rstrip("d")))
+
+        hour_12 = self._hour or 12
+        hour_24 = hour_12 % 12 + (12 if self._ampm == "pm" else 0)
+        local_dt = base.replace(hour=hour_24, minute=self._minute, second=0, microsecond=0)
+        return _local_to_utc(local_dt)
+
+    # ------------------------------------------------------------------
+    # Confirm / Cancel button callbacks
+    # ------------------------------------------------------------------
+
+    async def _confirm_callback(self, interaction: discord.Interaction) -> None:
+        """Save the selected date/time to the task."""
+        if interaction.user.id != self._task.user_id:
+            await interaction.response.send_message(
+                embed=error_embed("You don't have permission to modify this task."),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        dt = self._resolve_dt()
+        if self._field == "due_at":
+            req = TaskUpdateRequest(due_at=dt)
+        else:
+            req = TaskUpdateRequest(reminder_at=dt)
+        updated = await self._db.update_task(self._task.id, req)
+        if updated is None:
+            await interaction.followup.send(
+                embed=error_embed("Task not found."), ephemeral=True
+            )
+            return
+        label = "Due date" if self._field == "due_at" else "Reminder"
+        detail_view = TaskDetailView(task=updated, db=self._db)
+        await interaction.followup.send(
+            content=f"✅ {label} set!",
+            embed=task_detail_embed(updated),
+            view=detail_view,
+            ephemeral=True,
+        )
+        self.stop()
+
+    async def _cancel_callback(self, interaction: discord.Interaction) -> None:
+        """Dismiss the picker without saving."""
+        await interaction.response.edit_message(content="Cancelled.", view=None)
+        self.stop()
+
+
+# ---------------------------------------------------------------------------
 # Status selector
 # ---------------------------------------------------------------------------
 
@@ -372,7 +756,43 @@ class TaskDetailView(ui.View):
             if hasattr(child, "disabled"):
                 child.disabled = True
 
-    @ui.button(label="✏️ Edit", style=discord.ButtonStyle.primary)
+    @ui.button(label="📅 Due Date", style=discord.ButtonStyle.secondary, row=1)
+    async def due_date_button(
+        self, interaction: discord.Interaction, _button: ui.Button
+    ) -> None:
+        """Open the quick due-date picker."""
+        if interaction.user.id != self._task.user_id:
+            await interaction.response.send_message(
+                embed=error_embed("You don't have permission to modify this task."),
+                ephemeral=True,
+            )
+            return
+        picker = DatePickerView(task=self._task, db=self._db, field="due_at")
+        await interaction.response.send_message(
+            content=picker._summary(),
+            view=picker,
+            ephemeral=True,
+        )
+
+    @ui.button(label="🔔 Reminder", style=discord.ButtonStyle.secondary, row=1)
+    async def reminder_button(
+        self, interaction: discord.Interaction, _button: ui.Button
+    ) -> None:
+        """Open the quick reminder picker."""
+        if interaction.user.id != self._task.user_id:
+            await interaction.response.send_message(
+                embed=error_embed("You don't have permission to modify this task."),
+                ephemeral=True,
+            )
+            return
+        picker = DatePickerView(task=self._task, db=self._db, field="reminder_at")
+        await interaction.response.send_message(
+            content=picker._summary(),
+            view=picker,
+            ephemeral=True,
+        )
+
+    @ui.button(label="✏️ Edit", style=discord.ButtonStyle.primary, row=0)
     async def edit_button(
         self, interaction: discord.Interaction, _button: ui.Button
     ) -> None:
@@ -386,7 +806,7 @@ class TaskDetailView(ui.View):
         modal = TaskEditModal(task=self._task, db=self._db)
         await interaction.response.send_modal(modal)
 
-    @ui.button(label="✅ Mark Done", style=discord.ButtonStyle.success)
+    @ui.button(label="✅ Mark Done", style=discord.ButtonStyle.success, row=0)
     async def done_button(
         self, interaction: discord.Interaction, _button: ui.Button
     ) -> None:
@@ -410,7 +830,7 @@ class TaskDetailView(ui.View):
             embed=task_detail_embed(updated), view=view, ephemeral=True
         )
 
-    @ui.button(label="🗑️ Delete", style=discord.ButtonStyle.danger)
+    @ui.button(label="🗑️ Delete", style=discord.ButtonStyle.danger, row=0)
     async def delete_button(
         self, interaction: discord.Interaction, _button: ui.Button
     ) -> None:
