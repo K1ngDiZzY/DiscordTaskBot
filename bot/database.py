@@ -21,41 +21,6 @@ logger = logging.getLogger(__name__)
 # tzinfo is always stripped before storage and never re-attached on retrieval.
 # Callers that need aware datetimes should do `dt.replace(tzinfo=UTC)`.
 
-_CREATE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS tasks (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id         INTEGER NOT NULL,
-    guild_id        INTEGER NOT NULL,
-    channel_id      INTEGER,
-    title           TEXT    NOT NULL,
-    description     TEXT    NOT NULL DEFAULT '',
-    status          TEXT    NOT NULL DEFAULT 'pending',
-    priority        TEXT    NOT NULL DEFAULT 'medium',
-    due_at          TEXT,
-    reminder_at     TEXT,
-    reminder_sent   INTEGER NOT NULL DEFAULT 0,
-    assigned_to_id  INTEGER,
-    created_at      TEXT    NOT NULL,
-    updated_at      TEXT    NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks (user_id);
-CREATE INDEX IF NOT EXISTS idx_tasks_reminder ON tasks (reminder_at, reminder_sent);
-"""
-
-# Separate statement so it only runs after the migration has added the column
-# to pre-existing databases.  executescript() commits implicitly, so running
-# the index creation in the same script as CREATE TABLE would fail on old DBs
-# that don't yet have the column.
-_CREATE_ASSIGNED_INDEX_SQL = """
-CREATE INDEX IF NOT EXISTS idx_tasks_assigned ON tasks (assigned_to_id);
-"""
-
-# Migration: add assigned_to_id to existing databases that pre-date this column.
-_MIGRATE_SQL = """
-ALTER TABLE tasks ADD COLUMN assigned_to_id INTEGER;
-"""
-
 _DT_FMT = "%Y-%m-%dT%H:%M:%S"
 
 
@@ -125,32 +90,52 @@ class Database:
         Path(self._path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(self._path)
         self._conn.row_factory = aiosqlite.Row
-        # 1. Create table + basic indexes (no assigned_to_id index yet).
-        await self._conn.executescript(_CREATE_TABLE_SQL)
+
+        # 1. Create table and basic indexes using individual execute() calls to
+        #    avoid the implicit COMMIT that executescript() issues in Python 3.12+,
+        #    which can raise OperationalError when the connection state is active.
+        await self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tasks (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id         INTEGER NOT NULL,
+                guild_id        INTEGER NOT NULL,
+                channel_id      INTEGER,
+                title           TEXT    NOT NULL,
+                description     TEXT    NOT NULL DEFAULT '',
+                status          TEXT    NOT NULL DEFAULT 'pending',
+                priority        TEXT    NOT NULL DEFAULT 'medium',
+                due_at          TEXT,
+                reminder_at     TEXT,
+                reminder_sent   INTEGER NOT NULL DEFAULT 0,
+                assigned_to_id  INTEGER,
+                created_at      TEXT    NOT NULL,
+                updated_at      TEXT    NOT NULL
+            )
+            """
+        )
+        await self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks (user_id)"
+        )
+        await self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_reminder ON tasks (reminder_at, reminder_sent)"
+        )
         await self._conn.commit()
-        # 2. Best-effort migration: add assigned_to_id if the column is absent.
-        try:
-            await self._conn.execute(_MIGRATE_SQL)
+
+        # 2. Migration: add assigned_to_id to databases that pre-date this column.
+        #    Use PRAGMA table_info for a reliable column-existence check instead of
+        #    catching the OperationalError from a speculative ALTER TABLE.
+        async with self._conn.execute("PRAGMA table_info(tasks)") as cur:
+            columns = {row["name"] async for row in cur}
+        if "assigned_to_id" not in columns:
+            await self._conn.execute("ALTER TABLE tasks ADD COLUMN assigned_to_id INTEGER")
             await self._conn.commit()
             logger.info("Migration applied: added assigned_to_id column.")
-        except aiosqlite.OperationalError as exc:
-            # Column already exists — SQLite raises OperationalError; ignore only
-            # the duplicate-column case and re-raise anything unexpected.
-            message = str(exc).lower()
-            if "duplicate column" in message or "already exists" in message:
-                logger.debug(
-                    "Migration skipped: assigned_to_id column already exists: %s",
-                    exc,
-                )
-            else:
-                logger.error(
-                    "Unexpected OperationalError during migration; "
-                    "database schema may be inconsistent.",
-                    exc_info=True,
-                )
-                raise
+
         # 3. Now safe to create the index that depends on assigned_to_id.
-        await self._conn.executescript(_CREATE_ASSIGNED_INDEX_SQL)
+        await self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_assigned ON tasks (assigned_to_id)"
+        )
         await self._conn.commit()
         logger.info("Database connected: %s", self._path)
 
