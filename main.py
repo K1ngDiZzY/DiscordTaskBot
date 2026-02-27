@@ -64,9 +64,11 @@ async def _main() -> None:
             async with bot:
                 await bot.start(settings.discord_token)
             break  # clean exit (e.g. KeyboardInterrupt forwarded as SystemExit)
-        except TimeoutError:
+        except (TimeoutError, AttributeError, OSError, ConnectionError) as exc:
             logger.warning(
-                "Connection to Discord timed out. Retrying in %s seconds…",
+                "Connection to Discord failed (%s: %s). Retrying in %s seconds…",
+                type(exc).__name__,
+                exc,
                 retry_delay,
             )
             await asyncio.sleep(retry_delay)
