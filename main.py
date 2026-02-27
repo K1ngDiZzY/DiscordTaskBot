@@ -50,9 +50,28 @@ async def _main() -> None:
     logger = logging.getLogger(__name__)
     logger.info("Starting Discord Task Bot…")
 
+    # Ensure a token is present before attempting to start the bot.
+    if not settings.discord_token:
+        logger.error(
+            "DISCORD_TOKEN is not set. Set the DISCORD_TOKEN environment variable or provide it in .env"
+        )
+        raise SystemExit(1)
+
     bot = DiscordBot()
-    async with bot:
-        await bot.start(settings.discord_token)
+    retry_delay = 5  # seconds between reconnect attempts
+    while True:
+        try:
+            async with bot:
+                await bot.start(settings.discord_token)
+            break  # clean exit (e.g. KeyboardInterrupt forwarded as SystemExit)
+        except TimeoutError:
+            logger.warning(
+                "Connection to Discord timed out. Retrying in %s seconds…",
+                retry_delay,
+            )
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 60)  # exponential back-off, cap 60s
+            bot = DiscordBot()  # fresh instance for the retry
 
 
 def main() -> None:

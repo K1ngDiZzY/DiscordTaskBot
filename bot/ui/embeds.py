@@ -30,12 +30,13 @@ _PRIORITY_LABEL: dict[TaskPriority, str] = {
 def _fmt_dt(dt: datetime | None) -> str:
     """Format a datetime for display, or 'Not set' if None.
 
-    Note: ``dt`` is treated as naive UTC. UTC is attached before conversion
-    to avoid incorrect timestamps on non-UTC hosts.
+    Datetimes are stored as naive UTC throughout the codebase.
+    UTC is re-attached here so :func:`datetime.timestamp` produces
+    the correct Unix epoch regardless of the host's local timezone.
+    Discord renders ``<t:unix:F>`` in each viewer's own local timezone.
     """
     if dt is None:
         return "Not set"
-    # Attach UTC so timestamp() is correct regardless of the server's locale.
     aware = dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
     ts = int(aware.timestamp())
     return f"<t:{ts}:F> (<t:{ts}:R>)"
@@ -82,6 +83,13 @@ def task_detail_embed(task: Task) -> discord.Embed:
             + (" ✅ sent" if task.reminder_sent else "")
         ),
         inline=False,
+    )
+    embed.add_field(
+        name="Assigned To",
+        value=(
+            f"<@{task.assigned_to_id}>" if task.assigned_to_id else "*Unassigned*"
+        ),
+        inline=True,
     )
     embed.add_field(
         name="Created",
@@ -181,6 +189,50 @@ def reminder_embed(task: Task) -> discord.Embed:
         inline=True,
     )
     embed.set_footer(text=f"Task #{task.id}")
+    return embed
+
+
+def task_assigned_embed(
+    task: Task,
+    *,
+    assigner: discord.User | discord.Member,
+) -> discord.Embed:
+    """Build a notification embed sent to an assignee when a task is assigned.
+
+    Args:
+        task: The task that was assigned.
+        assigner: The Discord member who performed the assignment.
+
+    Returns:
+        A styled embed for the assignment notification.
+    """
+    embed = discord.Embed(
+        title=f"📬 You have been assigned a task — {task.title}",
+        description=task.description or "*No description provided.*",
+        colour=discord.Colour.blurple(),
+        timestamp=datetime.now(UTC),
+    )
+    embed.add_field(
+        name="Priority",
+        value=_PRIORITY_LABEL.get(task.priority, task.priority.value),
+        inline=True,
+    )
+    embed.add_field(
+        name="Status",
+        value=f"{task.status_emoji} {task.status.value.replace('_', ' ').title()}",
+        inline=True,
+    )
+    embed.add_field(
+        name="Due Date",
+        value=_fmt_dt(task.due_at),
+        inline=False,
+    )
+    embed.add_field(
+        name="Assigned by",
+        value=assigner.mention,
+        inline=False,
+    )
+    embed.set_footer(text=f"Task #{task.id} • Use /task view {task.id} to see details")
     return embed
 
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 
+import aiohttp
 import discord
 from discord.ext import commands
 
@@ -34,10 +35,19 @@ class DiscordBot(commands.Bot):
         intents = discord.Intents.default()
         # We only need to read message content if using prefix commands,
         # which this bot does not. Slash commands don't require it.
+        #
+        # Use a connector with a higher keepalive timeout to prevent premature
+        # SSL handshake timeouts on slower hardware (e.g. Raspberry Pi / ARM).
+        connector = aiohttp.TCPConnector(
+            limit=0,
+            keepalive_timeout=60.0,
+            force_close=False,
+        )
         super().__init__(
             command_prefix="!",  # Fallback prefix — slash commands are primary.
             intents=intents,
             help_command=None,  # We use slash commands exclusively.
+            connector=connector,
         )
         self.db: Database = Database(settings.database_path)
         self._ready_fired: bool = False

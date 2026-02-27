@@ -64,6 +64,12 @@ class RemindersCog(commands.Cog, name="Reminders"):
             try:
                 await self._dispatch_reminder(task)
                 await self.bot.db.mark_reminder_sent(task.id)
+            except TimeoutError as exc:
+                logger.warning(
+                    "Timed out dispatching reminder for task %s (will retry): %s",
+                    task.id,
+                    exc,
+                )
             except (OSError, RuntimeError, discord.DiscordException) as exc:
                 logger.exception(
                     "Failed to dispatch reminder for task %s: %s", task.id, exc
@@ -112,7 +118,7 @@ class RemindersCog(commands.Cog, name="Reminders"):
                         task.id,
                         channel.name,
                     )
-                except discord.DiscordException as exc:
+                except (discord.DiscordException, TimeoutError) as exc:
                     logger.warning(
                         "Could not send reminder to channel %s: %s",
                         task.channel_id,
@@ -134,7 +140,7 @@ class RemindersCog(commands.Cog, name="Reminders"):
                     task.id,
                     task.user_id,
                 )
-            except discord.DiscordException as exc:
+            except (discord.DiscordException, TimeoutError) as exc:
                 logger.error(
                     "Could not send DM reminder for task #%s to user %s: %s",
                     task.id,

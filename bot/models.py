@@ -72,6 +72,7 @@ class Task:
     reminder_at: datetime | None
     reminder_sent: bool
     channel_id: int | None
+    assigned_to_id: int | None
     created_at: datetime
     updated_at: datetime
 
@@ -119,6 +120,7 @@ class TaskCreateRequest:
     priority: TaskPriority = TaskPriority.MEDIUM
     due_at: datetime | None = None
     reminder_at: datetime | None = None
+    assigned_to_id: int | None = None
 
 
 @dataclass
@@ -136,3 +138,5 @@ class TaskUpdateRequest:
     reminder_at: datetime | None = field(default=None)
     clear_due: bool = False
     clear_reminder: bool = False
+    assigned_to_id: int | None = None
+    clear_assigned: bool = False

@@ -18,6 +18,7 @@ It provides a chronological record of all development sessions carried out by th
 | 2026-02-17 | Full Discord Task Bot implementation — models, DB, UI, cogs, Pi deploy | Architect, Python Dev, Discord Dev, Code Reviewer, Tech Writer, Agent Logger | ✅ Complete | [002_0000_discord-task-bot-implementation.md](2026-02-17/002_0000_discord-task-bot-implementation.md) |
 | 2026-02-17 | Code review (Pass 1) + full remediation of 1 Critical, 7 Major, 6 Minor issues | Code Reviewer, Python Dev, Discord Dev, Agent Logger | ✅ Complete (Pass 2 pending) | [003_0000_code-review-and-fixes.md](2026-02-17/003_0000_code-review-and-fixes.md) |
 | 2026-02-17 | Type-checker warning remediation — 6 suppressors resolved across database.py, views.py, config.py | Code Reviewer, Python Dev, Agent Logger | ✅ Complete | [004_1730_type-warning-remediation.md](2026-02-17/004_1730_type-warning-remediation.md) |
+| 2026-02-18 | Runtime fixes & date picker redesign — TimeoutError handling, label-length fix, structured DatePickerView, BOT_TIMEZONE UTC conversion | GitHub Copilot (Discord Dev + Code Reviewer + Agent Logger) | ✅ Complete | [001_0013_runtime-fixes-and-date-picker.md](2026-02-18/001_0013_runtime-fixes-and-date-picker.md) |
 
 ---
 

@@ -34,12 +34,26 @@ CREATE TABLE IF NOT EXISTS tasks (
     due_at          TEXT,
     reminder_at     TEXT,
     reminder_sent   INTEGER NOT NULL DEFAULT 0,
+    assigned_to_id  INTEGER,
     created_at      TEXT    NOT NULL,
     updated_at      TEXT    NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks (user_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_reminder ON tasks (reminder_at, reminder_sent);
+"""
+
+# Separate statement so it only runs after the migration has added the column
+# to pre-existing databases.  executescript() commits implicitly, so running
+# the index creation in the same script as CREATE TABLE would fail on old DBs
+# that don't yet have the column.
+_CREATE_ASSIGNED_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_tasks_assigned ON tasks (assigned_to_id);
+"""
+
+# Migration: add assigned_to_id to existing databases that pre-date this column.
+_MIGRATE_SQL = """
+ALTER TABLE tasks ADD COLUMN assigned_to_id INTEGER;
 """
 
 _DT_FMT = "%Y-%m-%dT%H:%M:%S"
@@ -76,6 +90,7 @@ def _row_to_task(row: aiosqlite.Row) -> Task:
         due_at=_str_to_dt(row["due_at"]),
         reminder_at=_str_to_dt(row["reminder_at"]),
         reminder_sent=bool(row["reminder_sent"]),
+        assigned_to_id=row["assigned_to_id"],
         created_at=_str_to_dt(created_raw),  # type: ignore[arg-type]  # guaranteed non-None by check above
         updated_at=_str_to_dt(updated_raw),  # type: ignore[arg-type]  # guaranteed non-None by check above
     )
@@ -110,7 +125,32 @@ class Database:
         Path(self._path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(self._path)
         self._conn.row_factory = aiosqlite.Row
+        # 1. Create table + basic indexes (no assigned_to_id index yet).
         await self._conn.executescript(_CREATE_TABLE_SQL)
+        await self._conn.commit()
+        # 2. Best-effort migration: add assigned_to_id if the column is absent.
+        try:
+            await self._conn.execute(_MIGRATE_SQL)
+            await self._conn.commit()
+            logger.info("Migration applied: added assigned_to_id column.")
+        except aiosqlite.OperationalError as exc:
+            # Column already exists — SQLite raises OperationalError; ignore only
+            # the duplicate-column case and re-raise anything unexpected.
+            message = str(exc).lower()
+            if "duplicate column" in message or "already exists" in message:
+                logger.debug(
+                    "Migration skipped: assigned_to_id column already exists: %s",
+                    exc,
+                )
+            else:
+                logger.error(
+                    "Unexpected OperationalError during migration; "
+                    "database schema may be inconsistent.",
+                    exc_info=True,
+                )
+                raise
+        # 3. Now safe to create the index that depends on assigned_to_id.
+        await self._conn.executescript(_CREATE_ASSIGNED_INDEX_SQL)
         await self._conn.commit()
         logger.info("Database connected: %s", self._path)
 
@@ -158,8 +198,8 @@ class Database:
             INSERT INTO tasks
                 (user_id, guild_id, channel_id, title, description,
                  status, priority, due_at, reminder_at, reminder_sent,
-                 created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                 assigned_to_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
             """,
             (
                 req.user_id,
@@ -171,6 +211,7 @@ class Database:
                 req.priority.value,
                 _dt_to_str(req.due_at),
                 _dt_to_str(req.reminder_at),
+                getattr(req, "assigned_to_id", None),
                 _dt_to_str(now),
                 _dt_to_str(now),
             ),
@@ -318,6 +359,12 @@ class Database:
             values.append(_dt_to_str(req.reminder_at))
             fields.append("reminder_sent = ?")
             values.append(0)
+        if req.clear_assigned:
+            fields.append("assigned_to_id = ?")
+            values.append(None)
+        elif req.assigned_to_id is not None:
+            fields.append("assigned_to_id = ?")
+            values.append(req.assigned_to_id)
 
         if not fields:
             return await self.get_task(task_id)
@@ -352,6 +399,82 @@ class Database:
             deleted = cursor.rowcount > 0
         await self._db.commit()
         return deleted
+
+    async def get_tasks_assigned_to(
+        self,
+        assigned_to_id: int,
+        guild_id: int,
+        *,
+        status: TaskStatus | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[Task]:
+        """Return tasks assigned to a specific user in a guild.
+
+        Args:
+            assigned_to_id: Discord user snowflake of the assignee.
+            guild_id: Discord guild snowflake.
+            status: Optional status filter.
+            limit: Maximum rows to return.
+            offset: Pagination offset.
+
+        Returns:
+            List of tasks ordered by created_at descending.
+        """
+        if status is not None:
+            query = """
+                SELECT * FROM tasks
+                WHERE assigned_to_id = ? AND guild_id = ? AND status = ?
+                ORDER BY created_at DESC
+                LIMIT ? OFFSET ?
+            """
+            params = (assigned_to_id, guild_id, status.value, limit, offset)
+        else:
+            query = """
+                SELECT * FROM tasks
+                WHERE assigned_to_id = ? AND guild_id = ?
+                ORDER BY created_at DESC
+                LIMIT ? OFFSET ?
+            """
+            params = (assigned_to_id, guild_id, limit, offset)
+
+        async with self._db.execute(query, params) as cursor:
+            rows = await cursor.fetchall()
+        return [_row_to_task(r) for r in rows]
+
+    async def count_tasks_assigned_to(
+        self,
+        assigned_to_id: int,
+        guild_id: int,
+        *,
+        status: TaskStatus | None = None,
+    ) -> int:
+        """Return total tasks assigned to a user in a guild.
+
+        Args:
+            assigned_to_id: Discord user snowflake of the assignee.
+            guild_id: Discord guild snowflake.
+            status: Optional status filter.
+
+        Returns:
+            Row count.
+        """
+        if status is not None:
+            query = (
+                "SELECT COUNT(*) FROM tasks "
+                "WHERE assigned_to_id = ? AND guild_id = ? AND status = ?"
+            )
+            params = (assigned_to_id, guild_id, status.value)
+        else:
+            query = (
+                "SELECT COUNT(*) FROM tasks "
+                "WHERE assigned_to_id = ? AND guild_id = ?"
+            )
+            params = (assigned_to_id, guild_id)
+
+        async with self._db.execute(query, params) as cursor:
+            row = await cursor.fetchone()
+        return row[0] if row else 0
 
     # ------------------------------------------------------------------
     # Reminder helpers
