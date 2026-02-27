@@ -712,7 +712,8 @@ class StatusSelect(ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         """Handle status selection and update the task in the database."""
-        if interaction.user.id != self._task.user_id:
+        user_id = interaction.user.id
+        if user_id != self._task.user_id and user_id != self._task.assigned_to_id:
             await interaction.response.send_message(
                 embed=error_embed("You don't have permission to modify this task."),
                 ephemeral=True,
@@ -811,7 +812,8 @@ class TaskDetailView(ui.View):
         self, interaction: discord.Interaction, _button: ui.Button
     ) -> None:
         """Mark this task as done instantly."""
-        if interaction.user.id != self._task.user_id:
+        user_id = interaction.user.id
+        if user_id != self._task.user_id and user_id != self._task.assigned_to_id:
             await interaction.response.send_message(
                 embed=error_embed("You don't have permission to modify this task."),
                 ephemeral=True,

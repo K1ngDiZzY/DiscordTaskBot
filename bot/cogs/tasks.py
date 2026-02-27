@@ -183,8 +183,14 @@ class TasksCog(commands.Cog, name="Tasks"):
         """
         await interaction.response.defer(ephemeral=True)
 
+        guild_id = interaction.guild_id or 0
+        user_id = interaction.user.id
         task = await self.bot.db.get_task(task_id)
-        if task is None or task.user_id != interaction.user.id:
+        if (
+            task is None
+            or task.guild_id != guild_id
+            or (task.user_id != user_id and task.assigned_to_id != user_id)
+        ):
             await interaction.followup.send(
                 embed=error_embed("Task not found or you don't have access to it."),
                 ephemeral=True,
@@ -212,8 +218,14 @@ class TasksCog(commands.Cog, name="Tasks"):
         """
         await interaction.response.defer(ephemeral=True)
 
+        guild_id = interaction.guild_id or 0
+        user_id = interaction.user.id
         task = await self.bot.db.get_task(task_id)
-        if task is None or task.user_id != interaction.user.id:
+        if (
+            task is None
+            or task.guild_id != guild_id
+            or (task.user_id != user_id and task.assigned_to_id != user_id)
+        ):
             await interaction.followup.send(
                 embed=error_embed("Task not found or you don't have access to it."),
                 ephemeral=True,
@@ -249,8 +261,13 @@ class TasksCog(commands.Cog, name="Tasks"):
         """
         await interaction.response.defer(ephemeral=True)
 
+        guild_id = interaction.guild_id or 0
         task = await self.bot.db.get_task(task_id)
-        if task is None or task.user_id != interaction.user.id:
+        if (
+            task is None
+            or task.user_id != interaction.user.id
+            or task.guild_id != guild_id
+        ):
             await interaction.followup.send(
                 embed=error_embed(
                     "Task not found or you don't have access to it."
@@ -302,8 +319,13 @@ class TasksCog(commands.Cog, name="Tasks"):
         """
         await interaction.response.defer(ephemeral=True)
 
+        guild_id = interaction.guild_id or 0
         task = await self.bot.db.get_task(task_id)
-        if task is None or task.user_id != interaction.user.id:
+        if (
+            task is None
+            or task.user_id != interaction.user.id
+            or task.guild_id != guild_id
+        ):
             await interaction.followup.send(
                 embed=error_embed("Task not found or you don't have access to it."),
                 ephemeral=True,
